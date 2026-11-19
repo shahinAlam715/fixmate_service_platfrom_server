@@ -116,6 +116,25 @@ app.get("/services", async(req, res)=>{
     res.send(result)
 })
 
+app.get("/services/:technicianEmail", async (req, res) => {
+  try {
+    const { technicianEmail } = req.params
+
+    const result = await serviceCollection.find({
+      technicianEmail: technicianEmail,
+    }).toArray()
+
+    if (!result) {
+      return res.status(404).send({ message: "Service not found" })
+    }
+
+    res.send(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).send({ message: "Internal server error" })
+  }
+})
+
 // Service Data End
 
 app.listen(PORT,()=>{
