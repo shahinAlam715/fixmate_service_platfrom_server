@@ -401,3 +401,5 @@ app.patch("/services/:id/availability", async (req, res) => {
 app.listen(PORT,()=>{
     console.log(`port is runing at  ${PORT}`);
 })
+
+export default app
