@@ -172,6 +172,72 @@ app.get("/services", async (req, res) => {
   }
 })
 
+
+// Approve data/ pending start
+
+
+app.patch("/services/:id/approval", async (req, res) => {
+  try {
+    const { id } = req.params
+    const { approvalStatus } = req.body
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID" })
+    }
+
+    if (!["approved", "rejected"].includes(approvalStatus)) {
+      return res.status(400).send({ message: "Invalid approval status" })
+    }
+
+    const result = await serviceCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          approvalStatus,
+          updatedAt: new Date(),
+        },
+      }
+    )
+
+    res.send(result)
+  } catch (error) {
+    console.error("Approval error:", error)
+    res.status(500).send({ message: "Failed to update approval status" })
+  }
+})
+
+app.get("/services/pending", async (req, res) => {
+    try {
+        const result = await serviceCollection
+        .find({ approvalStatus: "pending" })
+        .sort({ createdAt: -1 })
+        .toArray()
+        
+    res.send(result)
+  } catch (error) {
+    console.error("Pending services error:", error)
+    res.status(500).send({ message: "Failed to get pending services" })
+  }
+})
+
+// Get All Services (admin — any approval status)
+// NOTE: must be registered BEFORE /services/:id or "all" would match as an id
+app.get("/services/all", async (req, res) => {
+    try {
+        const result = await serviceCollection
+        .find({})
+        .sort({ createdAt: -1 })
+        .toArray()
+
+    res.send(result)
+  } catch (error) {
+    console.error("All services error:", error)
+    res.status(500).send({ message: "Failed to get all services" })
+  }
+})
+
+// admin power approve/reject
+
 // Get Single Service
 app.get("/services/:id", async (req, res) => {
   try {
@@ -329,6 +395,7 @@ app.patch("/services/:id/availability", async (req, res) => {
 })
 
 // Service Data End
+
 
 
 app.listen(PORT,()=>{
