@@ -103,26 +103,89 @@ app.delete("/users/:id", async (req, res) => {
 
 // user Data End
 
+
+
 // Service Data Start
 
-app.post("/services", async(req, res)=>{
-    const data = req.body
-    const result = await serviceCollection.insertOne(data)
-    res.send(result)
-})
-app.get("/services", async(req, res)=>{
-    const data = req.body
-    const result = await serviceCollection.find(data).toArray()
-    res.send(result)
-})
-
-app.get("/services/:technicianEmail", async (req, res) => {
+// Add Service
+app.post("/services", async (req, res) => {
   try {
-    const { technicianEmail } = req.params
+    const data = req.body
 
-    const result = await serviceCollection.find({
-      technicianEmail: technicianEmail,
-    }).toArray()
+    const result = await serviceCollection.insertOne(data)
+
+    res.send(result)
+  } catch (error) {
+    console.error("Add service error:", error)
+    res.status(500).send({ message: "Failed to add service" })
+  }
+})
+
+// Get All Approved & Available Services
+app.get("/services", async (req, res) => {
+  try {
+    const { category, search, serviceMode, sort } = req.query
+
+    const query = {
+      approvalStatus: "approved",
+      isAvailable: true,
+    }
+
+    // Category Filter
+    if (category) {
+      query.category = category
+    }
+
+    // Service Mode Filter
+    if (serviceMode) {
+      query.serviceMode = serviceMode
+    }
+
+    // Search Filter
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: "i" } },
+        { category: { $regex: search, $options: "i" } },
+        { serviceArea: { $regex: search, $options: "i" } },
+        { technicianName: { $regex: search, $options: "i" } },
+      ]
+    }
+
+    // Sort
+    let sortOption = { createdAt: -1 }
+
+    if (sort === "price-low") {
+      sortOption = { basePrice: 1 }
+    } else if (sort === "price-high") {
+      sortOption = { basePrice: -1 }
+    }
+
+    const result = await serviceCollection
+      .find(query)
+      .sort(sortOption)
+      .toArray()
+
+    res.send(result)
+  } catch (error) {
+    console.error("Get services error:", error)
+    res.status(500).send({ message: "Failed to fetch services" })
+  }
+})
+
+// Get Single Service
+app.get("/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID" })
+    }
+
+    const result = await serviceCollection.findOne({
+      _id: new ObjectId(id),
+      approvalStatus: "approved",
+      isAvailable: true,
+    })
 
     if (!result) {
       return res.status(404).send({ message: "Service not found" })
@@ -130,12 +193,143 @@ app.get("/services/:technicianEmail", async (req, res) => {
 
     res.send(result)
   } catch (error) {
-    console.error(error)
-    res.status(500).send({ message: "Internal server error" })
+    console.error("Get single service error:", error)
+    res.status(500).send({ message: "Failed to fetch service" })
+  }
+})
+
+// Get Technician's Services
+app.get("/services/technician/:technicianEmail", async (req, res) => {
+  try {
+    const { technicianEmail } = req.params
+
+    const result = await serviceCollection
+      .find({ technicianEmail })
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    res.send(result)
+  } catch (error) {
+    console.error("Get technician services error:", error)
+    res.status(500).send({ message: "Failed to fetch technician services" })
+  }
+})
+
+// Update Service
+app.patch("/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params
+    const data = req.body
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID" })
+    }
+
+    const updatedService = {
+      title: data.title,
+      category: data.category,
+      description: data.description,
+      image: data.image,
+      basePrice: Number(data.basePrice),
+      estimatedDuration: data.estimatedDuration,
+      serviceMode: data.serviceMode,
+      serviceArea: data.serviceArea,
+      technicianName: data.technicianName,
+      technicianEmail: data.technicianEmail,
+      approvalStatus: "pending",
+      updatedAt: new Date(),
+    }
+
+    const result = await serviceCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: updatedService,
+      }
+    )
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ message: "Service not found" })
+    }
+
+    res.send({
+      message: "Service updated successfully and sent for approval",
+      result,
+    })
+  } catch (error) {
+    console.error("Update service error:", error)
+    res.status(500).send({ message: "Failed to update service" })
+  }
+})
+
+// Delete Service
+app.delete("/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID" })
+    }
+
+    const result = await serviceCollection.deleteOne({
+      _id: new ObjectId(id),
+    })
+
+    if (result.deletedCount === 0) {
+      return res.status(404).send({ message: "Service not found" })
+    }
+
+    res.send({
+      message: "Service deleted successfully",
+      deletedCount: result.deletedCount,
+    })
+  } catch (error) {
+    console.error("Delete service error:", error)
+    res.status(500).send({ message: "Failed to delete service" })
+  }
+})
+
+// Toggle Service Availability
+app.patch("/services/:id/availability", async (req, res) => {
+  try {
+    const { id } = req.params
+    const { isAvailable } = req.body
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid service ID" })
+    }
+
+    if (typeof isAvailable !== "boolean") {
+      return res.status(400).send({
+        message: "isAvailable must be true or false",
+      })
+    }
+
+    const result = await serviceCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          isAvailable,
+          updatedAt: new Date(),
+        },
+      }
+    )
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ message: "Service not found" })
+    }
+
+    res.send({
+      message: `Service is now ${isAvailable ? "available" : "unavailable"}`,
+      result,
+    })
+  } catch (error) {
+    console.error("Availability update error:", error)
+    res.status(500).send({ message: "Failed to update availability" })
   }
 })
 
 // Service Data End
+
 
 app.listen(PORT,()=>{
     console.log(`port is runing at  ${PORT}`);
