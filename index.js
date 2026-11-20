@@ -405,17 +405,21 @@ app.patch("/services/:id/availability", async (req, res) => {
 // POST /bookings
 // ================================
 
+// ================================
+// CREATE REPAIR REQUEST
+// POST /bookings
+// ================================
+
 app.post("/bookings", async (req, res) => {
   try {
     const {
       serviceId,
+      customerEmail,
       customerPhone,
       address,
       preferredDate,
       problemDescription,
     } = req.body;
-
-    const customerEmail = req.user.email;
 
     // Validate service ID
     if (!ObjectId.isValid(serviceId)) {
@@ -424,7 +428,20 @@ app.post("/bookings", async (req, res) => {
       });
     }
 
-    // Find logged-in customer
+    // Validate required fields
+    if (
+      !customerEmail ||
+      !customerPhone ||
+      !address ||
+      !preferredDate ||
+      !problemDescription
+    ) {
+      return res.status(400).send({
+        message: "Please fill in all required fields",
+      });
+    }
+
+    // Find customer from database
     const customer = await userCollection.findOne({
       email: customerEmail,
     });
@@ -456,18 +473,7 @@ app.post("/bookings", async (req, res) => {
       });
     }
 
-    // Validate form data
-    if (
-      !customerPhone ||
-      !address ||
-      !preferredDate ||
-      !problemDescription
-    ) {
-      return res.status(400).send({
-        message: "Please fill in all required fields",
-      });
-    }
-
+    // Validate preferred date
     const requestedDate = new Date(preferredDate);
 
     if (Number.isNaN(requestedDate.getTime())) {
@@ -482,6 +488,7 @@ app.post("/bookings", async (req, res) => {
       });
     }
 
+    // Validate problem description
     if (problemDescription.trim().length < 20) {
       return res.status(400).send({
         message: "Problem description must be at least 20 characters",
@@ -521,6 +528,7 @@ app.post("/bookings", async (req, res) => {
       updatedAt: new Date(),
     };
 
+    // Insert booking into database
     const result = await bookingCollection.insertOne(booking);
 
     res.status(201).send({
@@ -538,7 +546,13 @@ app.post("/bookings", async (req, res) => {
 
 app.get("/bookings/my-bookings", async (req, res) => {
   try {
-    const customerEmail = req.user.email;
+    const customerEmail = req.query.customerEmail || req.user?.email;
+
+    if (!customerEmail) {
+      return res.status(400).send({
+        message: "customerEmail is required",
+      });
+    }
 
     const result = await bookingCollection
       .find({ customerEmail })
@@ -586,8 +600,7 @@ app.get("/bookings/technician",  async (req, res) => {
 });
 
 
-app.patch(
-  "/bookings/:id/status",
+app.patch("/bookings/:id/status",
  
   async (req, res) => {
     try {
@@ -693,13 +706,18 @@ app.patch(
 
 
 
-app.patch(
-  "/bookings/:id/cancel",
+app.patch("/bookings/:id/cancel",
  
   async (req, res) => {
     try {
       const { id } = req.params;
-      const customerEmail = req.user.email;
+      const customerEmail = req.body?.customerEmail || req.query.customerEmail || req.user?.email;
+
+      if (!customerEmail) {
+        return res.status(400).send({
+          message: "customerEmail is required",
+        });
+      }
 
       if (!ObjectId.isValid(id)) {
         return res.status(400).send({
@@ -770,6 +788,135 @@ app.patch(
   }
 );
 
+
+// ================================
+// ADMIN - GET ALL BOOKINGS
+// GET /bookings/admin?email=admin@email.com
+// ================================
+
+app.get("/bookings/admin", async (req, res) => {
+  try {
+    const adminEmail = req.query.email;
+
+    if (!adminEmail) {
+      return res.status(400).send({
+        message: "Admin email is required",
+      });
+    }
+
+    // Verify admin from user collection
+    const admin = await userCollection.findOne({
+      email: adminEmail,
+      role: "admin",
+    });
+
+    if (!admin) {
+      return res.status(403).send({
+        message: "Forbidden: Admin access required",
+      });
+    }
+
+    // Get all bookings
+    const result = await bookingCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(result);
+  } catch (error) {
+    console.error("Admin all bookings error:", error);
+
+    res.status(500).send({
+      message: "Failed to get all bookings",
+    });
+  }
+});
+
+
+// ================================
+// ADMIN - ACCEPT REJECTED BOOKING
+// PATCH /bookings/:id/admin-accept
+// ================================
+
+app.patch("/bookings/:id/admin-accept", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminEmail } = req.body;
+
+    // Validate booking ID
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid booking ID",
+      });
+    }
+
+    if (!adminEmail) {
+      return res.status(400).send({
+        message: "Admin email is required",
+      });
+    }
+
+    // Verify admin
+    const admin = await userCollection.findOne({
+      email: adminEmail,
+      role: "admin",
+    });
+
+    if (!admin) {
+      return res.status(403).send({
+        message: "Forbidden: Admin access required",
+      });
+    }
+
+    // Find rejected booking
+    const booking = await bookingCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!booking) {
+      return res.status(404).send({
+        message: "Booking not found",
+      });
+    }
+
+    // Only rejected bookings can be accepted by admin
+    if (booking.status !== "rejected") {
+      return res.status(400).send({
+        message: "Only rejected bookings can be accepted by admin",
+      });
+    }
+
+    // Update booking
+    const result = await bookingCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        status: "rejected",
+      },
+      {
+        $set: {
+          status: "accepted",
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).send({
+        message: "Booking status changed. Please refresh.",
+      });
+    }
+
+    res.send({
+      message: "Rejected booking accepted successfully by admin",
+    });
+  } catch (error) {
+    console.error("Admin accept booking error:", error);
+
+    res.status(500).send({
+      message: "Failed to accept rejected booking",
+    });
+  }
+});
 
 
 app.listen(PORT,()=>{
