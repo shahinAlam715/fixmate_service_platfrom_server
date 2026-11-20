@@ -569,9 +569,16 @@ app.get("/bookings/my-bookings", async (req, res) => {
   }
 });
 
-app.get("/bookings/technician",  async (req, res) => {
+// GET TECHNICIAN BOOKINGS
+app.get("/bookings/technician", async (req, res) => {
   try {
-    const technicianEmail = req.user.email;
+    const technicianEmail = req.query.technicianEmail;
+
+    if (!technicianEmail) {
+      return res.status(400).send({
+        message: "technicianEmail is required",
+      });
+    }
 
     const technician = await userCollection.findOne({
       email: technicianEmail,
@@ -600,110 +607,58 @@ app.get("/bookings/technician",  async (req, res) => {
 });
 
 
-app.patch("/bookings/:id/status",
- 
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { status, finalAmount } = req.body;
 
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).send({
-          message: "Invalid booking ID",
-        });
-      }
+app.patch("/bookings/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
 
-      const technicianEmail = req.user.email;
-
-      // Verify technician role
-      const technician = await userCollection.findOne({
-        email: technicianEmail,
-        role: "technician",
-      });
-
-      if (!technician) {
-        return res.status(403).send({
-          message: "Only technicians can update booking status",
-        });
-      }
-
-      const booking = await bookingCollection.findOne({
-        _id: new ObjectId(id),
-        technicianEmail,
-      });
-
-      if (!booking) {
-        return res.status(404).send({
-          message: "Booking not found",
-        });
-      }
-
-      // Allowed transitions
-      const allowedTransitions = {
-        requested: ["accepted", "rejected"],
-        accepted: ["in-progress"],
-        "in-progress": ["completed"],
-      };
-
-      if (
-        !allowedTransitions[booking.status]?.includes(status)
-      ) {
-        return res.status(400).send({
-          message: `Cannot change status from ${booking.status} to ${status}`,
-        });
-      }
-
-      const updateData = {
-        status,
-        updatedAt: new Date(),
-      };
-
-      // Technician sets final amount when completing
-      if (status === "completed") {
-        const amount =
-          finalAmount === undefined
-            ? booking.basePrice
-            : Number(finalAmount);
-
-        if (!Number.isFinite(amount) || amount < 0) {
-          return res.status(400).send({
-            message: "Invalid final amount",
-          });
-        }
-
-        updateData.finalAmount = amount;
-      }
-
-      const result = await bookingCollection.updateOne(
-        {
-          _id: new ObjectId(id),
-          technicianEmail,
-          status: booking.status,
-        },
-        {
-          $set: updateData,
-        }
-      );
-
-      if (result.modifiedCount === 0) {
-        return res.status(409).send({
-          message: "Booking status changed. Please refresh.",
-        });
-      }
-
-      res.send({
-        message: "Booking status updated successfully",
-      });
-    } catch (error) {
-      console.error("Update booking status error:", error);
-
-      res.status(500).send({
-        message: "Failed to update booking status",
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid booking ID",
       });
     }
-  }
-);
 
+    const allowedStatuses = [
+      "accepted",
+      "rejected",
+      "in-progress",
+      "completed",
+    ];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).send({
+        message: "Invalid booking status",
+      });
+    }
+
+    const result = await bookingCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          status,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({
+        message: "Booking not found",
+      });
+    }
+
+    res.send({
+      message: "Booking status updated successfully",
+    });
+  } catch (error) {
+    console.error("Update booking status error:", error);
+
+    res.status(500).send({
+      message: "Failed to update booking status",
+    });
+  }
+});
 
 
 app.patch("/bookings/:id/cancel",
