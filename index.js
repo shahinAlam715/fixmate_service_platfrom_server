@@ -24,6 +24,7 @@ const mongodbUsers = await connectToMongoDB()
 const dataBase = mongodbUsers.db("fixmateusers")
 const userCollection = dataBase.collection("user")
 const serviceCollection = dataBase.collection("services")
+const bookingCollection = dataBase.collection("bookings")
 
 
 app.get("/", (req, res)=>{
@@ -395,6 +396,379 @@ app.patch("/services/:id/availability", async (req, res) => {
 })
 
 // Service Data End
+
+
+// booking collection start
+
+// ================================
+// CREATE REPAIR REQUEST
+// POST /bookings
+// ================================
+
+app.post("/bookings", async (req, res) => {
+  try {
+    const {
+      serviceId,
+      customerPhone,
+      address,
+      preferredDate,
+      problemDescription,
+    } = req.body;
+
+    const customerEmail = req.user.email;
+
+    // Validate service ID
+    if (!ObjectId.isValid(serviceId)) {
+      return res.status(400).send({
+        message: "Invalid service ID",
+      });
+    }
+
+    // Find logged-in customer
+    const customer = await userCollection.findOne({
+      email: customerEmail,
+    });
+
+    if (!customer || customer.role !== "customer") {
+      return res.status(403).send({
+        message: "Only customers can create repair requests",
+      });
+    }
+
+    // Find service
+    const service = await serviceCollection.findOne({
+      _id: new ObjectId(serviceId),
+    });
+
+    if (!service) {
+      return res.status(404).send({
+        message: "Service not found",
+      });
+    }
+
+    // Check service availability
+    if (
+      service.approvalStatus !== "approved" ||
+      service.isAvailable !== true
+    ) {
+      return res.status(400).send({
+        message: "This service is currently unavailable",
+      });
+    }
+
+    // Validate form data
+    if (
+      !customerPhone ||
+      !address ||
+      !preferredDate ||
+      !problemDescription
+    ) {
+      return res.status(400).send({
+        message: "Please fill in all required fields",
+      });
+    }
+
+    const requestedDate = new Date(preferredDate);
+
+    if (Number.isNaN(requestedDate.getTime())) {
+      return res.status(400).send({
+        message: "Invalid preferred date",
+      });
+    }
+
+    if (requestedDate < new Date()) {
+      return res.status(400).send({
+        message: "Preferred date cannot be in the past",
+      });
+    }
+
+    if (problemDescription.trim().length < 20) {
+      return res.status(400).send({
+        message: "Problem description must be at least 20 characters",
+      });
+    }
+
+    // Create booking document
+    const booking = {
+      serviceId: service._id.toString(),
+
+      // Service snapshot
+      serviceTitle: service.title,
+      serviceImage: service.image,
+      category: service.category,
+      basePrice: service.basePrice,
+
+      // Technician snapshot
+      technicianName: service.technicianName,
+      technicianEmail: service.technicianEmail,
+
+      // Customer data from database
+      customerName: customer.name,
+      customerEmail: customer.email,
+      customerPhone: customerPhone.trim(),
+
+      // Request form data
+      address: address.trim(),
+      preferredDate: requestedDate,
+      problemDescription: problemDescription.trim(),
+
+      // Default status
+      status: "requested",
+      finalAmount: service.basePrice,
+      paymentStatus: "unpaid",
+
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await bookingCollection.insertOne(booking);
+
+    res.status(201).send({
+      message: "Repair request submitted successfully",
+      insertedId: result.insertedId,
+    });
+  } catch (error) {
+    console.error("Create booking error:", error);
+
+    res.status(500).send({
+      message: "Failed to create repair request",
+    });
+  }
+});
+
+app.get("/bookings/my-bookings", async (req, res) => {
+  try {
+    const customerEmail = req.user.email;
+
+    const result = await bookingCollection
+      .find({ customerEmail })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(result);
+  } catch (error) {
+    console.error("My bookings error:", error);
+
+    res.status(500).send({
+      message: "Failed to get bookings",
+    });
+  }
+});
+
+app.get("/bookings/technician",  async (req, res) => {
+  try {
+    const technicianEmail = req.user.email;
+
+    const technician = await userCollection.findOne({
+      email: technicianEmail,
+      role: "technician",
+    });
+
+    if (!technician) {
+      return res.status(403).send({
+        message: "Only technicians can access these bookings",
+      });
+    }
+
+    const result = await bookingCollection
+      .find({ technicianEmail })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(result);
+  } catch (error) {
+    console.error("Technician bookings error:", error);
+
+    res.status(500).send({
+      message: "Failed to get technician bookings",
+    });
+  }
+});
+
+
+app.patch(
+  "/bookings/:id/status",
+ 
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, finalAmount } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          message: "Invalid booking ID",
+        });
+      }
+
+      const technicianEmail = req.user.email;
+
+      // Verify technician role
+      const technician = await userCollection.findOne({
+        email: technicianEmail,
+        role: "technician",
+      });
+
+      if (!technician) {
+        return res.status(403).send({
+          message: "Only technicians can update booking status",
+        });
+      }
+
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(id),
+        technicianEmail,
+      });
+
+      if (!booking) {
+        return res.status(404).send({
+          message: "Booking not found",
+        });
+      }
+
+      // Allowed transitions
+      const allowedTransitions = {
+        requested: ["accepted", "rejected"],
+        accepted: ["in-progress"],
+        "in-progress": ["completed"],
+      };
+
+      if (
+        !allowedTransitions[booking.status]?.includes(status)
+      ) {
+        return res.status(400).send({
+          message: `Cannot change status from ${booking.status} to ${status}`,
+        });
+      }
+
+      const updateData = {
+        status,
+        updatedAt: new Date(),
+      };
+
+      // Technician sets final amount when completing
+      if (status === "completed") {
+        const amount =
+          finalAmount === undefined
+            ? booking.basePrice
+            : Number(finalAmount);
+
+        if (!Number.isFinite(amount) || amount < 0) {
+          return res.status(400).send({
+            message: "Invalid final amount",
+          });
+        }
+
+        updateData.finalAmount = amount;
+      }
+
+      const result = await bookingCollection.updateOne(
+        {
+          _id: new ObjectId(id),
+          technicianEmail,
+          status: booking.status,
+        },
+        {
+          $set: updateData,
+        }
+      );
+
+      if (result.modifiedCount === 0) {
+        return res.status(409).send({
+          message: "Booking status changed. Please refresh.",
+        });
+      }
+
+      res.send({
+        message: "Booking status updated successfully",
+      });
+    } catch (error) {
+      console.error("Update booking status error:", error);
+
+      res.status(500).send({
+        message: "Failed to update booking status",
+      });
+    }
+  }
+);
+
+
+
+app.patch(
+  "/bookings/:id/cancel",
+ 
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const customerEmail = req.user.email;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({
+          message: "Invalid booking ID",
+        });
+      }
+
+      const customer = await userCollection.findOne({
+        email: customerEmail,
+        role: "customer",
+      });
+
+      if (!customer) {
+        return res.status(403).send({
+          message: "Only customers can cancel bookings",
+        });
+      }
+
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(id),
+        customerEmail,
+      });
+
+      if (!booking) {
+        return res.status(404).send({
+          message: "Booking not found",
+        });
+      }
+
+      // Customer can cancel only requested bookings
+      if (booking.status !== "requested") {
+        return res.status(400).send({
+          message:
+            "You can only cancel a request before technician accepts it",
+        });
+      }
+
+      const result = await bookingCollection.updateOne(
+        {
+          _id: new ObjectId(id),
+          customerEmail,
+          status: "requested",
+        },
+        {
+          $set: {
+            status: "cancelled",
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      if (result.modifiedCount === 0) {
+        return res.status(409).send({
+          message: "Booking status changed. Please refresh.",
+        });
+      }
+
+      res.send({
+        message: "Repair request cancelled successfully",
+      });
+    } catch (error) {
+      console.error("Cancel booking error:", error);
+
+      res.status(500).send({
+        message: "Failed to cancel repair request",
+      });
+    }
+  }
+);
 
 
 
