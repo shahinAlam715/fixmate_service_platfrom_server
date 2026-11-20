@@ -123,55 +123,67 @@ app.post("/services", async (req, res) => {
 })
 
 // Get All Approved & Available Services
+
+
 app.get("/services", async (req, res) => {
   try {
-    const { category, search, serviceMode, sort } = req.query
+    const {
+      category,
+      search,
+      serviceMode,
+      sort,
+      limit,
+    } = req.query;
 
-    const query = {
-      approvalStatus: "approved",
-      isAvailable: true,
-    }
+    const query = {};
 
-    // Category Filter
-    if (category) {
-      query.category = category
-    }
+    if (category) query.category = category;
 
-    // Service Mode Filter
-    if (serviceMode) {
-      query.serviceMode = serviceMode
-    }
-
-    // Search Filter
     if (search) {
       query.$or = [
         { title: { $regex: search, $options: "i" } },
+        { serviceTitle: { $regex: search, $options: "i" } },
         { category: { $regex: search, $options: "i" } },
-        { serviceArea: { $regex: search, $options: "i" } },
-        { technicianName: { $regex: search, $options: "i" } },
-      ]
+      ];
     }
 
-    // Sort
-    let sortOption = { createdAt: -1 }
+    if (serviceMode) query.serviceMode = serviceMode;
+
+    // Default: latest services first
+    let sortOption = { createdAt: -1 };
 
     if (sort === "price-low") {
-      sortOption = { basePrice: 1 }
+      sortOption = { price: 1 };
     } else if (sort === "price-high") {
-      sortOption = { basePrice: -1 }
+      sortOption = { price: -1 };
+    } else if (sort === "oldest") {
+      sortOption = { createdAt: 1 };
     }
 
-    const result = await serviceCollection
+    let cursor = serviceCollection
       .find(query)
-      .sort(sortOption)
-      .toArray()
+      .sort(sortOption);
 
-    res.send(result)
+    // Apply limit only when requested
+    if (limit) {
+      const parsedLimit = parseInt(limit);
+
+      if (parsedLimit > 0) {
+        cursor = cursor.limit(parsedLimit);
+      }
+    }
+
+    const result = await cursor.toArray();
+
+    res.send(result);
   } catch (error) {
-    console.error("Get services error:", error)
-    res.status(500).send({ message: "Failed to fetch services" })
+    console.error(error);
+
+    res.status(500).send({
+      message: "Failed to fetch services",
+    });
   }
-})
+});
 
 
 // Approve data/ pending start
