@@ -1,5 +1,6 @@
 import { MongoClient, ObjectId } from 'mongodb';
 import express from "express"
+import Stripe from "stripe"
 import cors from "cors"
 import 'dotenv/config'
 const app = express()
@@ -8,7 +9,7 @@ const PORT = process.env.PORT || 5000
 app.use(cors())
 app.use(express.json())
 
-
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
 const client = new MongoClient(process.env.MONGODB_URI);
 
 export async function connectToMongoDB() {
@@ -25,6 +26,9 @@ const dataBase = mongodbUsers.db("fixmateusers")
 const userCollection = dataBase.collection("user")
 const serviceCollection = dataBase.collection("services")
 const bookingCollection = dataBase.collection("bookings")
+const paymentsCollection = dataBase.collection("payments")
+
+
 
 
 app.get("/", (req, res)=>{
@@ -623,7 +627,7 @@ app.get("/bookings/technician", async (req, res) => {
 app.patch("/bookings/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, finalAmount } = req.body;
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).send({
@@ -644,13 +648,28 @@ app.patch("/bookings/:id/status", async (req, res) => {
       });
     }
 
+    const update = {
+      status,
+      updatedAt: new Date(),
+    };
+
+    // Technician sets the final amount when marking a booking completed
+    if (finalAmount !== undefined && finalAmount !== null && finalAmount !== "") {
+      const amount = Number(finalAmount);
+
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).send({
+          message: "Invalid final amount",
+        });
+      }
+
+      update.finalAmount = amount;
+    }
+
     const result = await bookingCollection.updateOne(
       { _id: new ObjectId(id) },
       {
-        $set: {
-          status,
-          updatedAt: new Date(),
-        },
+        $set: update,
       }
     );
 
@@ -754,6 +773,90 @@ app.patch("/bookings/:id/cancel",
     }
   }
 );
+
+
+// ================================
+// CUSTOMER - MARK BOOKING AS PAID
+// PATCH /bookings/:id/pay
+// Called by the client after Stripe Checkout confirms the session.
+// ================================
+app.patch("/bookings/:id/pay", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { customerEmail, stripeSessionId } = req.body || {};
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid booking ID",
+      });
+    }
+
+    if (!customerEmail) {
+      return res.status(400).send({
+        message: "customerEmail is required",
+      });
+    }
+
+    const booking = await bookingCollection.findOne({
+      _id: new ObjectId(id),
+      customerEmail,
+    });
+
+    if (!booking) {
+      return res.status(404).send({
+        message: "Booking not found",
+      });
+    }
+
+    // Idempotent — already paid bookings are left untouched
+    if (booking.paymentStatus === "paid") {
+      return res.send({
+        message: "Booking already marked as paid",
+        paymentStatus: "paid",
+      });
+    }
+
+    if (booking.status !== "completed") {
+      return res.status(400).send({
+        message: "Only completed bookings can be paid",
+      });
+    }
+
+    const result = await bookingCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        customerEmail,
+        paymentStatus: { $ne: "paid" },
+      },
+      {
+        $set: {
+          paymentStatus: "paid",
+          paidAt: new Date(),
+          stripeSessionId: stripeSessionId || "",
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.send({
+        message: "Booking already marked as paid",
+        paymentStatus: "paid",
+      });
+    }
+
+    res.send({
+      message: "Payment recorded successfully",
+      paymentStatus: "paid",
+    });
+  } catch (error) {
+    console.error("Mark booking paid error:", error);
+
+    res.status(500).send({
+      message: "Failed to record payment",
+    });
+  }
+});
 
 
 // ================================
@@ -884,6 +987,295 @@ app.patch("/bookings/:id/admin-accept", async (req, res) => {
     });
   }
 });
+
+
+
+// payment api 
+
+// app.post("/payments/verify-session", async (req, res) => {
+//   try {
+//     const { session_id } = req.body;
+
+//     // Retrieve Stripe checkout session
+//     const {
+//       status,
+//       customer_email,
+//       payment_intent,
+//       metadata,
+//       payment_status,
+//     } = await stripe.checkout.sessions.retrieve(session_id);
+
+//     // Verify payment
+//     if (status === "complete" && payment_status === "paid") {
+
+//       const sessionQuery = {session_id}
+//       const existingpament = await paymentsCollection.findOne(sessionQuery)
+//       if (existingpament) {
+//         return res.send({success:false, message:"payment already verify"})
+//       }
+
+//       const payment = {
+//         sessionId: session_id,
+//         status,
+//         customer_email,
+//         payment_intent,
+//         userId: metadata.userId,
+//         payment_status,
+//       };
+
+//       const result = await paymentsCollection.insertOne(payment);
+
+//       // Update user premium status
+//       const query = {
+//         _id: new ObjectId(metadata.userId),
+//       };
+
+//       const updateDoc = {
+//         $set: {
+//           premium: true,
+//         },
+//       };
+
+//       const updateResult = await userCollection.updateOne(query, updateDoc);
+
+//       return res.send({
+//         success: true,
+//         result,
+//         updateResult,
+//       });
+//     }
+
+//     res.send({
+//       success: false,
+//       message: "Payment verification failed",
+//     });
+//   } catch (error) {
+//     console.error("Payment verification error:", error);
+
+//     res.status(500).send({
+//       success: false,
+//       message: "Payment verification server error",
+//     });
+//   }
+// });
+
+
+app.post("/payments/verify-session", async (req, res) => {
+
+  try {
+    const { session_id } = req.body;
+
+    if (!session_id) {
+      return res.status(400).send({
+        success: false,
+        message: "Session ID is required",
+      });
+    }
+
+    // Retrieve Checkout Session from Stripe
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+
+    // Verify successful payment
+    if (
+      session.status !== "complete" ||
+      session.payment_status !== "paid"
+    ) {
+      return res.status(400).send({
+        success: false,
+        message: "Payment is not completed",
+      });
+    }
+
+    // Get bookingId from Stripe metadata
+    const bookingId = session.metadata?.bookingId;
+
+    if (!bookingId || !ObjectId.isValid(bookingId)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid booking ID in Stripe session",
+      });
+    }
+
+    // Find booking
+    const booking = await bookingCollection.findOne({
+      _id: new ObjectId(bookingId),
+    });
+
+    if (!booking) {
+      return res.status(404).send({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    // Only completed bookings can be paid
+    if (booking.status !== "completed") {
+      return res.status(400).send({
+        success: false,
+        message: "Only completed bookings can be paid",
+      });
+    }
+
+    // Check payment amount against booking amount
+    const expectedAmount = Math.round(Number(booking.finalAmount) * 100);
+
+    if (session.amount_total !== expectedAmount) {
+      return res.status(400).send({
+        success: false,
+        message: "Payment amount does not match booking amount",
+      });
+    }
+
+    // Check if session already recorded
+    const existingPayment = await paymentsCollection.findOne({
+      stripeSessionId: session.id,
+    });
+
+    if (existingPayment) {
+      return res.send({
+        success: true,
+        message: "Payment already verified",
+        payment: existingPayment,
+      });
+    }
+
+    // Prevent another session paying an already-paid booking
+    if (booking.paymentStatus === "paid") {
+      return res.status(409).send({
+        success: false,
+        message: "Booking has already been paid",
+      });
+    }
+
+    // Create payment document
+    const paymentData = {
+      bookingId: booking._id.toString(),
+
+      serviceTitle: booking.serviceTitle,
+
+      customerName: booking.customerName,
+      customerEmail: booking.customerEmail,
+
+      technicianName: booking.technicianName,
+      technicianEmail: booking.technicianEmail,
+
+      amount: booking.finalAmount,
+      currency: session.currency || "usd",
+
+      transactionId:
+        typeof session.payment_intent === "string"
+          ? session.payment_intent
+          : "",
+
+      stripeSessionId: session.id,
+
+      paymentStatus: "paid",
+
+      paidAt: new Date(),
+    };
+
+    // Save payment document
+    const paymentResult = await paymentsCollection.insertOne(
+      paymentData
+    );
+
+    // Update booking payment status
+    await bookingCollection.updateOne(
+      {
+        _id: booking._id,
+        paymentStatus: { $ne: "paid" },
+      },
+      {
+        $set: {
+          paymentStatus: "paid",
+          paidAt: new Date(),
+          stripeSessionId: session.id,
+          transactionId: paymentData.transactionId,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    res.send({
+      success: true,
+      message: "Payment verified and saved successfully",
+      paymentId: paymentResult.insertedId,
+    });
+  } catch (error) {
+    console.error("Payment verification error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Payment verification server error",
+    });
+  }
+});
+
+
+// ================================
+// GET CUSTOMER PAYMENTS BY EMAIL
+// GET /payments/my-payments?email=
+// ================================
+
+app.get("/payments/my-payments", async (req, res) => {
+  try {
+    const email = req.query.email;
+
+    if (!email) {
+      return res.status(400).send({
+        success: false,
+        message: "Customer email is required",
+      });
+    }
+
+    const result = await paymentsCollection
+      .find({ customerEmail: email })
+      .sort({ paidAt: -1 })
+      .toArray();
+
+    res.send({
+      success: true,
+      total: result.length,
+      payments: result,
+    });
+  } catch (error) {
+    console.error("Customer payments error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch payments",
+    });
+  }
+});
+
+
+// ================================
+// GET ALL PAYMENTS (ADMIN)
+// GET /payments/all-payments
+// ================================
+
+app.get("/payments/all-payments", async (req, res) => {
+  try {
+    const result = await paymentsCollection
+      .find()
+      .sort({ paidAt: -1 })
+      .toArray();
+
+    res.send({
+      success: true,
+      total: result.length,
+      payments: result,
+    });
+  } catch (error) {
+    console.error("All payments error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch all payments",
+    });
+  }
+});
+
 
 
 app.listen(PORT,()=>{
